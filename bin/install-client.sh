@@ -3,6 +3,8 @@ set -euo pipefail
 
 base_url="${LOCAL_OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 default_model="${LOCAL_OLLAMA_MODEL:-gemma4:26b}"
+small_fast_model="${LOCAL_OLLAMA_SMALL_FAST_MODEL:-$default_model}"
+small_fast_model_set=0
 install_dir="${LOCAL_MODEL_HOME:-$HOME/.local/share/local-model}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helpers_src="$repo_root/shell/local-helpers.sh"
@@ -15,6 +17,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --default-model)
       default_model="$2"
+      if [ "$small_fast_model_set" -eq 0 ]; then
+        small_fast_model="$2"
+      fi
+      shift 2
+      ;;
+    --small-fast-model)
+      small_fast_model="$2"
+      small_fast_model_set=1
       shift 2
       ;;
     --install-dir)
@@ -28,6 +38,8 @@ Usage: bin/install-client.sh [options]
 Options:
   --base-url URL          Ollama base URL, default http://127.0.0.1:11434
   --default-model MODEL   Default local model, default gemma4:26b
+  --small-fast-model MODEL
+                           Claude Code small/fast model, default same as default model
   --install-dir DIR       Helper install dir, default ~/.local/share/local-model
 EOF
       exit 0
@@ -45,6 +57,7 @@ cp "$helpers_src" "$install_dir/local-helpers.sh"
 cat > "$HOME/.config/local-model/env" <<EOF
 export LOCAL_OLLAMA_BASE_URL="\${LOCAL_OLLAMA_BASE_URL:-$base_url}"
 export LOCAL_OLLAMA_MODEL="\${LOCAL_OLLAMA_MODEL:-$default_model}"
+export LOCAL_OLLAMA_SMALL_FAST_MODEL="\${LOCAL_OLLAMA_SMALL_FAST_MODEL:-$small_fast_model}"
 export LOCAL_CODEX_MODEL_CATALOG="\${LOCAL_CODEX_MODEL_CATALOG:-\$HOME/.codex/local-ollama-model-catalog.json}"
 export LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW="\${LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW:-131072}"
 EOF

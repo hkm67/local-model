@@ -5,7 +5,10 @@ Use this repo on fresh machines and machines with older hand-written helpers.
 ## Fresh Client
 
 ```bash
-bin/install-client.sh --base-url http://YOUR_OLLAMA_HOST:11434 --default-model gemma4:26b
+bin/install-client.sh \
+  --base-url http://YOUR_OLLAMA_HOST:11434 \
+  --default-model gemma4:26b \
+  --small-fast-model qwen3.5:4b
 source ~/.bashrc
 ```
 

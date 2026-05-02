@@ -16,7 +16,10 @@ Plain `codex`, `claude`, and `opencode` keep their normal cloud behavior.
 ```bash
 git clone git@github.com:YOUR_USER/local-model.git
 cd local-model
-bin/install-client.sh --base-url http://YOUR_OLLAMA_HOST:11434 --default-model gemma4:26b
+bin/install-client.sh \
+  --base-url http://YOUR_OLLAMA_HOST:11434 \
+  --default-model gemma4:26b \
+  --small-fast-model qwen3.5:4b
 source ~/.bashrc
 ```
 
@@ -27,6 +30,7 @@ local-model current
 local-model list
 local-model caps qwen3.6-agent:35b
 local-model use qwen3.6-agent:35b
+local-model use-small qwen3.5:4b
 
 codex-local
 claude-local
@@ -45,6 +49,7 @@ Then switch from any installed client:
 
 ```bash
 local-model use qwen3.6-agent:35b
+local-model use-small qwen3.5:4b
 ```
 
 ## Why Agent Aliases

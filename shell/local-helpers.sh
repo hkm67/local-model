@@ -6,6 +6,7 @@ fi
 
 export LOCAL_OLLAMA_BASE_URL="${LOCAL_OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 export LOCAL_OLLAMA_MODEL="${LOCAL_OLLAMA_MODEL:-gemma4:26b}"
+export LOCAL_OLLAMA_SMALL_FAST_MODEL="${LOCAL_OLLAMA_SMALL_FAST_MODEL:-$LOCAL_OLLAMA_MODEL}"
 export LOCAL_CODEX_MODEL_CATALOG="${LOCAL_CODEX_MODEL_CATALOG:-$HOME/.codex/local-ollama-model-catalog.json}"
 export LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW="${LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW:-131072}"
 
@@ -21,6 +22,8 @@ Commands:
   local-model current        Show the active local model and endpoint
   local-model list           List models available from Ollama
   local-model use MODEL      Switch the local model for this shell
+  local-model use-small MODEL
+                            Switch Claude Code's small/fast model for this shell
   local-model caps MODEL     Show Ollama capabilities for MODEL
 EOF
 }
@@ -32,6 +35,7 @@ local-model() {
       ;;
     current)
       printf 'LOCAL_OLLAMA_MODEL=%s\n' "$LOCAL_OLLAMA_MODEL"
+      printf 'LOCAL_OLLAMA_SMALL_FAST_MODEL=%s\n' "$LOCAL_OLLAMA_SMALL_FAST_MODEL"
       printf 'LOCAL_OLLAMA_BASE_URL=%s\n' "$LOCAL_OLLAMA_BASE_URL"
       printf 'LOCAL_CODEX_MODEL_CATALOG=%s\n' "$LOCAL_CODEX_MODEL_CATALOG"
       printf 'LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW=%s\n' "$LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW"
@@ -90,6 +94,29 @@ raise SystemExit(1)
       fi
       export LOCAL_OLLAMA_MODEL="$2"
       printf 'Switched local model to %s\n' "$LOCAL_OLLAMA_MODEL"
+      ;;
+    use-small)
+      if [ -z "${2:-}" ]; then
+        printf 'usage: local-model use-small MODEL\n' >&2
+        return 1
+      fi
+      if ! curl -fsS "$LOCAL_OLLAMA_BASE_URL/api/tags" | python3 -c '
+import json, sys
+requested = sys.argv[1]
+names = sorted(model.get("name", "") for model in json.load(sys.stdin).get("models", []))
+if requested in names:
+    raise SystemExit(0)
+print("unknown local model: {}".format(requested), file=sys.stderr)
+if names:
+    print("available models:", file=sys.stderr)
+    for name in names:
+        print("  {}".format(name), file=sys.stderr)
+raise SystemExit(1)
+' "$2"; then
+        return 1
+      fi
+      export LOCAL_OLLAMA_SMALL_FAST_MODEL="$2"
+      printf 'Switched small/fast model to %s\n' "$LOCAL_OLLAMA_SMALL_FAST_MODEL"
       ;;
     *)
       printf 'unknown subcommand: %s\n' "$1" >&2
@@ -202,7 +229,7 @@ _claude_local() {
   ANTHROPIC_AUTH_TOKEN=ollama \
   ANTHROPIC_API_KEY=ollama \
   ANTHROPIC_MODEL="$LOCAL_OLLAMA_MODEL" \
-  ANTHROPIC_SMALL_FAST_MODEL="$LOCAL_OLLAMA_MODEL" \
+  ANTHROPIC_SMALL_FAST_MODEL="$LOCAL_OLLAMA_SMALL_FAST_MODEL" \
   ANTHROPIC_BASE_URL="$LOCAL_OLLAMA_BASE_URL" \
   claude --model "$LOCAL_OLLAMA_MODEL" "$@"
 }
