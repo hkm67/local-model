@@ -62,6 +62,15 @@ def slow_upstream():
 
 
 class BridgeTests(unittest.TestCase):
+    def setUp(self):
+        # The client refuses to run unconfigured, so every case gets a hermetic endpoint
+        # and key here. Otherwise results depend on the shell that ran the tests: Fedora
+        # exports them from ~/.bashrc, a non-interactive SSH session on the Pi does not.
+        env = patch.dict(os.environ, {"LOCAL_MODEL_BASE_URL": "http://127.0.0.1:9/v1",
+                                      "LOCAL_MODEL_API_KEY": "test-token"})
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_only_known_optional_features_are_removed(self):
         original = {"model": "qwen3.8:27B", "input": [
             {"type": "function_call_output", "call_id": "call_1", "output": "result"}],
