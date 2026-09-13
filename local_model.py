@@ -5,6 +5,8 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -13,9 +15,10 @@ from urllib.parse import urlsplit
 
 
 class ClientError(Exception):
-    def __init__(self, message, code=1):
+    def __init__(self, message, code=1, *, status=None):
         super().__init__(message)
         self.code = code
+        self.status = status  # HTTP status when the failure was an HTTP response
 
 
 class RequestCancelled(ClientError):
@@ -119,7 +122,7 @@ def request(path, payload=None, *, cancelled=None):
         hint = {401: "check LOCAL_MODEL_API_KEY", 403: "access denied",
                 404: "endpoint not supported by router", 422: "router rejected the request or output schema",
                 503: "model backend unavailable"}.get(status, "router request failed")
-        raise ClientError(f"HTTP {status} from {path}: {hint}", 22)
+        raise ClientError(f"HTTP {status} from {path}: {hint}", 22, status=status)
     try:
         data = json.loads(raw)
     except ValueError:
@@ -225,6 +228,208 @@ def opencode_config(rows, *, base=None, key_env="LOCAL_MODEL_API_KEY"):
             for row in rows}}}, "model": "local_tailscale/" + chosen_model()}
 
 
+def endpoint_parts():
+    parsed = urlsplit(base_url())
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.hostname, port, parsed.scheme
+
+
+def _tailnet_hint(host):
+    # Best effort only: separates "network path down" from "backend down" the way
+    # a human would first check the peer is online. Never fails the diagnosis.
+    if not host.endswith(".ts.net") or not shutil.which("tailscale"):
+        return None
+    try:
+        raw = subprocess.run(["tailscale", "status", "--json"], capture_output=True,
+                             text=True, timeout=5).stdout
+        peers = json.loads(raw).get("Peer", {})
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    short = host.split(".", 1)[0].lower()
+    for peer in peers.values():
+        if peer.get("DNSName", "").split(".", 1)[0].lower() == short:
+            return bool(peer.get("Online"))
+    return None
+
+
+def doctor(*, probe=False):
+    """Run the checks a human would to explain why the router is or isn't usable.
+
+    Each step prints OK / WARN / FAIL and a remediation hint. Discovery is proven
+    without inference (like `check`); pass --probe to also send one tiny request.
+    """
+    failed = []
+
+    def line(state, text, hint=""):
+        if state == "FAIL":
+            failed.append(text)
+        print(f"[{state:>4}] {text}" + (f"\n        -> {hint}" if hint else ""))
+
+    # 1. Configuration must exist before anything else can be checked.
+    try:
+        host, port, scheme = endpoint_parts()
+    except ClientError as exc:
+        line("FAIL", "configuration", str(exc))
+        raise ClientError("doctor: not configured", 2)
+    token_set = bool(setting("API_KEY", ""))
+    line("OK" if token_set else "FAIL", f"configuration: {base_url()}",
+         "" if token_set else "LOCAL_MODEL_API_KEY is empty; re-run bin/install-client.sh")
+
+    # 2. DNS + 3. raw TCP: a successful TCP connect with a later HTTP 5xx is the
+    #    signature of a live front-end (e.g. tailscale serve) over a dead backend.
+    connect = seconds("CONNECT_TIMEOUT", "5")
+    tcp_ok = False
+    try:
+        socket.getaddrinfo(host, port)
+        line("OK", f"DNS resolves {host}")
+    except OSError as exc:
+        line("FAIL", f"DNS cannot resolve {host}", str(exc))
+    try:
+        socket.create_connection((host, port), timeout=connect).close()
+        tcp_ok = True
+        line("OK", f"TCP connect {host}:{port}")
+    except OSError as exc:
+        line("FAIL", f"TCP connect {host}:{port}", f"{exc}; is the host up and Tailscale connected?")
+
+    online = _tailnet_hint(host)
+    if online is True:
+        line("OK", "tailnet peer online")
+    elif online is False:
+        line("WARN", "tailnet peer reported offline", "check the host and its tailscaled")
+
+    # 4. Discovery over HTTP: the layer that told 'router down' apart from 'unreachable'.
+    rows = None
+    try:
+        rows = models()
+        line("OK", f"GET /models -> {len(rows)} model(s): " + ", ".join(r["id"] for r in rows))
+    except ClientError as exc:
+        if exc.status in (502, 503, 504):
+            line("FAIL", f"GET /models -> HTTP {exc.status}",
+                 "endpoint reachable but the router/model backend behind it is down; "
+                 "restart the router process on the host (the TLS front-end stays up on its own)")
+        elif exc.status == 401:
+            line("FAIL", "GET /models -> HTTP 401", "LOCAL_MODEL_API_KEY is wrong")
+        elif exc.status == 404:
+            line("FAIL", "GET /models -> HTTP 404", "wrong path; LOCAL_MODEL_BASE_URL must end in /v1")
+        elif exc.code == 28:
+            line("FAIL", "GET /models timed out", "raise LOCAL_MODEL_TIMEOUT or check the router load")
+        else:
+            hint = "front-end unreachable despite open TCP" if tcp_ok else "cannot reach the endpoint"
+            line("FAIL", "GET /models", f"{exc}; {hint}")
+
+    # 5. Selected model must exist by its exact, case-sensitive ID.
+    if rows is not None:
+        try:
+            require_model(chosen_model(), rows)
+            line("OK", f"selected model {chosen_model()!r} is available")
+        except ClientError as exc:
+            line("FAIL", f"selected model {chosen_model()!r}", str(exc))
+
+    # 6. Optional: prove inference, not just discovery.
+    if probe and rows is not None and not failed:
+        try:
+            started = time.monotonic()
+            data = request("/responses", {
+                "model": chosen_model(), "input": "Reply with the single word OK.",
+                "stream": False, "store": False,
+                "reasoning": {"effort": setting("REASONING_EFFORT", "low")},
+                "max_output_tokens": 64})
+            final_text(data)
+            line("OK", f"inference probe returned final text ({time.monotonic() - started:.1f}s)")
+        except ClientError as exc:
+            line("FAIL", "inference probe", str(exc))
+
+    if failed:
+        sys.stdout.flush()  # keep step lines ahead of the stderr summary when piped
+        raise ClientError(f"doctor: {len(failed)} check(s) failed", 1)
+    print("doctor: all checks passed")
+
+
+CONNECT_TARGETS = ("curl", "python", "node", "env")
+
+
+def connect_snippet(target):
+    """Emit connection instructions so another project can talk to the router directly.
+
+    Snippets reference $LOCAL_MODEL_API_KEY / $LOCAL_MODEL_BASE_URL rather than the
+    literal secret, so they are safe to paste into other repos and shells.
+    """
+    base = base_url()
+    model = chosen_model()
+    if target in {"overview", "help", None}:
+        return f"""Local model endpoint (private; reachable only over Tailscale)
+
+  Endpoint : {base}   (OpenAI-compatible, Responses API; ends in /v1)
+  Auth     : Authorization: Bearer $LOCAL_MODEL_API_KEY
+  Default  : {model}   (IDs are case-sensitive; discover with `local-model list`)
+
+Two ways to use it from another project:
+
+  1. Shell out to this CLI (simplest, no code):
+       local-model ask 'your prompt'     one-shot text (no tools)
+       local-model list                  model IDs
+       local-model doctor                readiness + diagnostics
+
+  2. Connect directly. Print a ready-to-paste snippet for your stack:
+       local-model connect curl
+       local-model connect python
+       local-model connect node
+       local-model connect env
+
+How this router differs from stock OpenAI (read before wiring anything):
+  - Call POST /responses with stream:false, store:false. This is the Responses
+    API, not Chat Completions.
+  - /chat/completions is a schema-enforced *agent* route; do not use it for
+    ordinary text or your own JSON contracts.
+  - Streaming function calls are not supported; request non-streaming.
+  - Embeddings are not advertised (disabled).
+
+Config lives in ~/.config/local-model/env (0600). Shells that sourced the helpers
+already export LOCAL_MODEL_BASE_URL and LOCAL_MODEL_API_KEY. Otherwise load them:
+  set -a; . ~/.config/local-model/env; set +a"""
+    if target == "curl":
+        return f"""# Reads $LOCAL_MODEL_BASE_URL and $LOCAL_MODEL_API_KEY from the environment.
+curl -sS "$LOCAL_MODEL_BASE_URL/responses" \\
+  -H "Authorization: Bearer $LOCAL_MODEL_API_KEY" \\
+  -H 'Content-Type: application/json' \\
+  -d '{{"model": "{model}", "input": "Reply with OK only.", "stream": false, "store": false, "max_output_tokens": 256}}'
+# Final answer: .output[] | select(.type=="message").content[] | select(.type=="output_text").text"""
+    if target == "python":
+        return f"""# pip install openai   (or use urllib against /responses directly)
+import os
+from openai import OpenAI
+
+client = OpenAI(base_url=os.environ["LOCAL_MODEL_BASE_URL"],   # .../v1
+                api_key=os.environ["LOCAL_MODEL_API_KEY"])
+resp = client.responses.create(
+    model=os.environ.get("LOCAL_MODEL_MODEL", "{model}"),
+    input="Reply with OK only.",
+    store=False,          # this router requires store:false
+)
+print(resp.output_text)   # do NOT use chat.completions for general text here"""
+    if target == "node":
+        return f"""// npm install openai
+import OpenAI from "openai";
+
+const client = new OpenAI({{
+  baseURL: process.env.LOCAL_MODEL_BASE_URL,   // .../v1
+  apiKey: process.env.LOCAL_MODEL_API_KEY,
+}});
+const resp = await client.responses.create({{
+  model: process.env.LOCAL_MODEL_MODEL ?? "{model}",
+  input: "Reply with OK only.",
+  store: false,                                 // this router requires store:false
+}});
+console.log(resp.output_text);"""
+    if target == "env":
+        return f"""# For tools that read OPENAI_* and speak the Responses API:
+export OPENAI_BASE_URL="$LOCAL_MODEL_BASE_URL"
+export OPENAI_API_KEY="$LOCAL_MODEL_API_KEY"
+# Set the tool's model to: {model}
+# Responses API only; do not point a Chat-Completions-only tool here for general text."""
+    raise ClientError(f"usage: local-model connect [{'|'.join(CONNECT_TARGETS)}]", 2)
+
+
 def main(args):
     command = args[0] if args else "help"
     if command in {"help", "-h", "--help"}:
@@ -234,6 +439,8 @@ def main(args):
   local-model use MODEL     Switch this shell (case-sensitive)
   local-model caps MODEL    Show router capabilities; model metadata may be unknown
   local-model check         Check discovery and selected model without inference
+  local-model doctor        Diagnose the endpoint end to end (add --probe for inference)
+  local-model connect [T]   Print how to connect another project (T: curl|python|node|env)
   local-model ask PROMPT    Make one text-only Responses request (no tools)
   codex-local [args...]     Run Codex with the selected local model
   opencode-local [args...]  Run OpenCode using Responses and the selected model
@@ -262,6 +469,15 @@ Cloud CLI defaults are unchanged. Reload with: source ~/.bashrc""")
     elif command == "check":
         require_model(chosen_model())
         print(f"Discovery OK: {chosen_model()} at {base_url()} (inference not tested)")
+    elif command == "doctor":
+        extra = args[1:]
+        if extra not in ([], ["--probe"]):
+            raise ClientError("usage: local-model doctor [--probe]", 2)
+        doctor(probe=bool(extra))
+    elif command == "connect":
+        if len(args) > 2:
+            raise ClientError(f"usage: local-model connect [{'|'.join(CONNECT_TARGETS)}]", 2)
+        print(connect_snippet(args[1] if len(args) == 2 else "overview"))
     elif command == "ask":
         if len(args) != 2 or not args[1].strip():
             raise ClientError("usage: local-model ask 'PROMPT'", 2)

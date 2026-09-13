@@ -151,6 +151,41 @@ test "$LOCAL_OLLAMA_MODEL" = 'qwen3.8:27B'
         self.assertEqual(config["enabled_providers"], ["local_tailscale"])
         self.assertEqual(config["small_model"], config["model"])
 
+    def test_doctor_passes_when_endpoint_healthy(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            client.main(["doctor"])
+        text = output.getvalue()
+        self.assertIn("TCP connect", text)
+        self.assertIn("GET /models -> 1 model(s)", text)
+        self.assertIn("all checks passed", text)
+
+    def test_doctor_diagnoses_live_frontend_over_dead_backend(self):
+        # TCP connects (loopback) but the backend returns 5xx: the exact 502-behind-
+        # tailscale-serve incident. Doctor must name it, not just print "failed".
+        type(self).mode = "http-error"
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(client.ClientError) as ctx:
+            client.main(["doctor"])
+        text = output.getvalue()
+        self.assertIn("TCP connect", text)          # reachability succeeded
+        self.assertIn("HTTP 503", text)
+        self.assertIn("restart the router", text)   # actionable remediation
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_doctor_rejects_unknown_flags(self):
+        with self.assertRaisesRegex(client.ClientError, "usage: local-model doctor"):
+            client.main(["doctor", "--nope"])
+
+    def test_connect_snippets_never_print_the_api_key(self):
+        for target in ("overview", "curl", "python", "node", "env"):
+            snippet = client.connect_snippet(target)
+            self.assertNotIn("test-token", snippet)          # the real key value
+            self.assertIn("LOCAL_MODEL_API_KEY", snippet)     # referenced by name
+        self.assertIn("/responses", client.connect_snippet("curl"))
+        with self.assertRaisesRegex(client.ClientError, "usage: local-model connect"):
+            client.connect_snippet("ruby")
+
 
 if __name__ == "__main__":
     unittest.main()

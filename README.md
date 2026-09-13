@@ -5,6 +5,12 @@ without touching their normal cloud configuration.
 
 - `local-model current|list|caps MODEL|use MODEL|check|ask PROMPT` — inspect and switch
   the selected model, with bounded, authenticated requests (`local_model.py`).
+- `local-model doctor [--probe]` — diagnose the endpoint end to end (config, DNS, TCP,
+  tailnet peer, discovery, selected model; `--probe` also sends one tiny request). It
+  distinguishes an unreachable host from a reachable endpoint whose model backend is down.
+- `local-model connect [curl|python|node|env]` — print ready-to-paste instructions for
+  connecting another project directly to the router. Snippets reference
+  `$LOCAL_MODEL_BASE_URL`/`$LOCAL_MODEL_API_KEY`, so they never embed the secret.
 - `codex-local [args]` — run Codex against the selected model through a per-run loopback
   adapter (`codex_bridge.py`); Codex keeps all tool execution and approvals.
 - `opencode-local [args]` — the same adapter in OpenCode mode.
@@ -33,6 +39,18 @@ the env file every command exits 2 with a message saying so.
 `LOCAL_MODEL_INFERENCE_TIMEOUT` (180s), `LOCAL_MODEL_REASONING_EFFORT` (low). `local-model
 use` validates the ID case-sensitively against `GET /v1/models` before switching. `check`
 proves discovery, not inference; use `ask` for that.
+
+## Connecting another project
+
+Two supported paths, both discoverable from `local-model connect`:
+
+1. **Shell out to this CLI** — `local-model ask 'prompt'`, `local-model list`. Simplest;
+   nothing to wire up. Good for scripts and agents that can run a command.
+2. **Connect directly** — `local-model connect python|node|curl|env` prints a snippet for
+   an OpenAI-compatible **Responses** client (`POST /responses`, `stream:false`,
+   `store:false`). The router is *not* a Chat Completions endpoint for general text, does
+   not stream function calls, and does not advertise embeddings. `local-model connect`
+   with no target prints the overview and these caveats. Reachable only over Tailscale.
 
 ## Ollama host
 
