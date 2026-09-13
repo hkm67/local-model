@@ -1,103 +1,46 @@
 #!/usr/bin/env bash
+# Wire this checkout into the current account's shell.
+#
+#   bin/install-client.sh --base-url https://ROUTER/v1 --api-key KEY [--model ID]
+#
+# Writes ~/.config/local-model/env (0600) with the endpoint, key and default model, and
+# appends one line to ~/.bashrc that sources local-model.sh FROM THIS CHECKOUT — no copy
+# is made, so updating the checkout updates the shell. Re-run to change the endpoint.
 set -euo pipefail
 
-base_url="${LOCAL_OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-default_model="${LOCAL_OLLAMA_MODEL:-gemma4:26b}"
-small_fast_model="${LOCAL_OLLAMA_SMALL_FAST_MODEL:-$default_model}"
-small_fast_model_set=0
-install_dir="${LOCAL_MODEL_HOME:-$HOME/.local/share/local-model}"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-helpers_src="$repo_root/shell/local-helpers.sh"
-
+base_url=""; api_key=""; model=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --base-url)
-      base_url="$2"
-      shift 2
-      ;;
-    --default-model)
-      default_model="$2"
-      if [ "$small_fast_model_set" -eq 0 ]; then
-        small_fast_model="$2"
-      fi
-      shift 2
-      ;;
-    --small-fast-model)
-      small_fast_model="$2"
-      small_fast_model_set=1
-      shift 2
-      ;;
-    --install-dir)
-      install_dir="$2"
-      shift 2
-      ;;
+    --base-url) base_url="$2"; shift 2 ;;
+    --api-key)  api_key="$2";  shift 2 ;;
+    --model)    model="$2";    shift 2 ;;
     -h|--help)
-      cat <<'EOF'
-Usage: bin/install-client.sh [options]
-
-Options:
-  --base-url URL          Ollama base URL, default http://127.0.0.1:11434
-  --default-model MODEL   Default local model, default gemma4:26b
-  --small-fast-model MODEL
-                           Claude Code small/fast model, default same as default model
-  --install-dir DIR       Helper install dir, default ~/.local/share/local-model
-EOF
-      exit 0
-      ;;
-    *)
-      echo "unknown option: $1" >&2
-      exit 1
-      ;;
+      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
+[ -n "$base_url" ] && [ -n "$api_key" ] || { echo "usage: bin/install-client.sh --base-url URL --api-key KEY [--model ID]" >&2; exit 1; }
+case "$base_url" in */v1) ;; *) echo "--base-url must end in /v1" >&2; exit 1 ;; esac
 
-mkdir -p "$install_dir" "$HOME/.config/local-model"
-cp "$helpers_src" "$install_dir/local-helpers.sh"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+env_file="$HOME/.config/local-model/env"
 
-cat > "$HOME/.config/local-model/env" <<EOF
-export LOCAL_OLLAMA_BASE_URL="\${LOCAL_OLLAMA_BASE_URL:-$base_url}"
-export LOCAL_OLLAMA_MODEL="\${LOCAL_OLLAMA_MODEL:-$default_model}"
-export LOCAL_OLLAMA_SMALL_FAST_MODEL="\${LOCAL_OLLAMA_SMALL_FAST_MODEL:-$small_fast_model}"
-export LOCAL_CODEX_MODEL_CATALOG="\${LOCAL_CODEX_MODEL_CATALOG:-\$HOME/.codex/local-ollama-model-catalog.json}"
-export LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW="\${LOCAL_CODEX_FALLBACK_CONTEXT_WINDOW:-131072}"
-EOF
+umask 077
+mkdir -p "$HOME/.config/local-model"
+# ${VAR:-value}: the file supplies defaults, so a value set for one shell (or a test's
+# loopback server) still wins over the machine-wide endpoint.
+{
+  printf 'export LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-%s}"\n' "$base_url"
+  printf 'export LOCAL_MODEL_API_KEY="${LOCAL_MODEL_API_KEY:-%s}"\n' "$api_key"
+  [ -n "$model" ] && printf 'export LOCAL_MODEL_MODEL="${LOCAL_MODEL_MODEL:-%s}"\n' "$model"
+} > "$env_file"
+chmod 600 "$env_file"
 
-bashrc="$HOME/.bashrc"
-source_line="[ -f \"$install_dir/local-helpers.sh\" ] && . \"$install_dir/local-helpers.sh\""
-touch "$bashrc"
-if ! grep -Fq "$source_line" "$bashrc"; then
-  {
-    echo ""
-    echo "# local-model"
-    echo "$source_line"
-  } >> "$bashrc"
+source_line="source $(printf '%q' "$repo_root/local-model.sh")"
+touch "$HOME/.bashrc"
+if ! grep -Fqx "$source_line" "$HOME/.bashrc"; then
+  printf '\n# local-model (helpers sourced from the checkout)\n%s\n' "$source_line" >> "$HOME/.bashrc"
 fi
 
-python3 - "$base_url" <<'PY'
-import pathlib
-import sys
-
-base_url = sys.argv[1].rstrip("/")
-path = pathlib.Path.home() / ".codex" / "config.toml"
-path.parent.mkdir(parents=True, exist_ok=True)
-text = path.read_text() if path.exists() else ""
-
-block = f'''
-[model_providers.lan_ollama]
-name = "LAN Ollama"
-base_url = "{base_url}/v1"
-wire_api = "responses"
-
-[profiles.lan_ollama]
-model_provider = "lan_ollama"
-'''
-
-if "[model_providers.lan_ollama]" not in text:
-    if text and not text.endswith("\n"):
-        text += "\n"
-    text += block
-    path.write_text(text)
-PY
-
-echo "Installed local-model helpers."
-echo "Reload with: source ~/.bashrc"
+echo "wrote $env_file and wired $repo_root/local-model.sh into ~/.bashrc"
+echo "reload with: source ~/.bashrc   then: local-model current && local-model check"

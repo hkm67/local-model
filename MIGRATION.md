@@ -1,41 +1,23 @@
 # Migration
 
-Use this repo on fresh machines and machines with older hand-written helpers.
+## From the Ollama-native helpers (before September 2026)
 
-## Fresh Client
+The earlier generation of this repo talked to Ollama's native API (`/api/tags`,
+`/api/chat`) and installed a *copy* of `shell/local-helpers.sh` under
+`~/.local/share/local-model`, wired by a `# local-model` line in `~/.bashrc`, with
+`LOCAL_OLLAMA_*` variables in `~/.config/local-model/env` and a `lan_ollama` /
+`lan_gemma` provider in `~/.codex/config.toml`.
 
-```bash
-bin/install-client.sh \
-  --base-url http://YOUR_OLLAMA_HOST:11434 \
-  --default-model gemma4:26b \
-  --small-fast-model qwen3.5:4b
-source ~/.bashrc
-```
+None of that is used any more. On each machine:
 
-## Existing Client
+1. Remove the old `# local-model` source line and any `BEGIN local-ollama-agent-setup`
+   block from `~/.bashrc`; delete `~/.local/share/local-model`.
+2. Run `bin/install-client.sh --base-url https://ROUTER/v1 --api-key KEY` from the
+   checkout. It overwrites `~/.config/local-model/env` with `LOCAL_MODEL_*` values and
+   sources the checkout directly.
+3. The `lan_*` Codex providers can stay or go; `codex-local` configures its own
+   provider per run and does not read them.
+4. `source ~/.bashrc`, then `local-model current` and `local-model check`.
 
-If `~/.bashrc` already has a `BEGIN local-ollama-agent-setup` block, leave it while testing this repo. The installer appends a separate `# local-model` source line.
-
-After testing, remove the old block manually:
-
-```text
-# BEGIN local-ollama-agent-setup
-...
-# END local-ollama-agent-setup
-```
-
-Then open a new shell or run:
-
-```bash
-source ~/.bashrc
-```
-
-## Ollama Host
-
-Run:
-
-```bash
-ollama-host/create-agent-models.sh
-```
-
-The script skips models that are not installed and does not remove base model tags.
+`LOCAL_OLLAMA_BASE_URL` / `LOCAL_OLLAMA_MODEL` are still exported as compatibility
+aliases derived from the new values, for launchers that read the old names.
